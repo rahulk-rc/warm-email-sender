@@ -88,13 +88,41 @@ send_status = {
 
 
 def get_service():
-    """Lazy-init Gmail service."""
+    """Lazy-init Gmail service. Returns None if not authenticated."""
     global gmail_service, sender_email
     if gmail_service is None:
-        setup = GmailSetup()
-        gmail_service = setup.get_gmail_service()
-        profile = gmail_service.users().getProfile(userId='me').execute()
-        sender_email = profile['emailAddress']
+        # Try loading first available token from tokens dir
+        for token_file in sorted(TOKENS_DIR.glob('*.json')):
+            try:
+                creds = Credentials.from_authorized_user_file(str(token_file), SCOPES)
+                if creds.expired and creds.refresh_token:
+                    creds.refresh(Request())
+                    with open(token_file, 'w') as f:
+                        f.write(creds.to_json())
+                if creds.valid:
+                    gmail_service = build('gmail', 'v1', credentials=creds)
+                    profile = gmail_service.users().getProfile(userId='me').execute()
+                    sender_email = profile['emailAddress']
+                    return gmail_service
+            except Exception:
+                continue
+
+        # Fallback: try legacy token.json
+        legacy_token = SCRIPT_DIR / 'token.json'
+        if legacy_token.exists():
+            try:
+                creds = Credentials.from_authorized_user_file(str(legacy_token), SCOPES)
+                if creds.expired and creds.refresh_token:
+                    creds.refresh(Request())
+                if creds.valid:
+                    gmail_service = build('gmail', 'v1', credentials=creds)
+                    profile = gmail_service.users().getProfile(userId='me').execute()
+                    sender_email = profile['emailAddress']
+                    return gmail_service
+            except Exception:
+                pass
+
+        raise Exception("No authenticated Gmail account. Go to /setup to connect one.")
     return gmail_service
 
 
@@ -146,7 +174,7 @@ def index():
 
 @app.route('/api/status')
 def api_status():
-    """Return auth status and daily counts."""
+    """Return auth status and daily counts. Always returns 200 for healthcheck."""
     try:
         service = get_service()
         today_count = get_today_count()
@@ -162,8 +190,8 @@ def api_status():
         return jsonify({
             "authenticated": False,
             "error": str(e),
-            "message": "Run setup_gmail.py first to authenticate"
-        }), 401
+            "message": "Go to /setup to connect a Gmail account",
+        })
 
 
 @app.route('/api/upload', methods=['POST'])
@@ -588,20 +616,23 @@ def api_remove_account():
 
 def _migrate_legacy_data():
     """Move tokens and log from SCRIPT_DIR to DATA_DIR if they exist."""
-    legacy_log = SCRIPT_DIR / 'sent_log.json'
-    if legacy_log.exists() and not SENT_LOG_FILE.exists():
-        import shutil
-        shutil.copy2(legacy_log, SENT_LOG_FILE)
-        print(f"✓ Migrated sent_log.json to {DATA_DIR}")
+    try:
+        legacy_log = SCRIPT_DIR / 'sent_log.json'
+        if legacy_log.exists() and not SENT_LOG_FILE.exists():
+            import shutil
+            shutil.copy2(legacy_log, SENT_LOG_FILE)
+            print(f"✓ Migrated sent_log.json to {DATA_DIR}")
 
-    legacy_tokens = SCRIPT_DIR / 'tokens'
-    if legacy_tokens.exists() and legacy_tokens != TOKENS_DIR:
-        for tf in legacy_tokens.glob('*.json'):
-            dest = TOKENS_DIR / tf.name
-            if not dest.exists():
-                import shutil
-                shutil.copy2(tf, dest)
-                print(f"✓ Migrated token {tf.name} to {TOKENS_DIR}")
+        legacy_tokens = SCRIPT_DIR / 'tokens'
+        if legacy_tokens.exists() and legacy_tokens != TOKENS_DIR:
+            for tf in legacy_tokens.glob('*.json'):
+                dest = TOKENS_DIR / tf.name
+                if not dest.exists():
+                    import shutil
+                    shutil.copy2(tf, dest)
+                    print(f"✓ Migrated token {tf.name} to {TOKENS_DIR}")
+    except Exception as e:
+        print(f"⚠️  Migration skipped: {e}")
 
 _migrate_legacy_data()
 
@@ -613,12 +644,12 @@ if __name__ == '__main__':
     print("WARM EMAIL SENDER — WEB UI")
     print("=" * 60)
 
-    # Pre-auth on startup
+    # Try pre-auth on startup (non-fatal if it fails)
     try:
         get_service()
         print(f"✓ Authenticated as: {sender_email}")
-    except Exception as e:
-        print(f"⚠️  Gmail not authenticated — go to /setup to connect an account")
+    except Exception:
+        print(f"⚠️  No Gmail account connected yet — go to /setup to connect one")
 
     print(f"\n🌐 Dashboard: http://localhost:{PORT}")
     print(f"   Setup:     http://localhost:{PORT}/setup")
