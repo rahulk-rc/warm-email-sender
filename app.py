@@ -350,6 +350,7 @@ def _send_worker(recipients):
                 "subject": r['subject'],
                 "cc": r.get('cc', ''),
                 "bcc": r.get('bcc', ''),
+                "sender_email": sender_email,
                 "gmail_message_id": result.get('id', ''),
                 "gmail_thread_id": result.get('threadId', ''),
                 "rfc_message_id": msg['Message-ID'],
@@ -413,9 +414,27 @@ def api_log():
 def api_track():
     """Run reply tracker and return updated log."""
     try:
-        service = get_service()
         log = load_log()
         updated = 0
+
+        # Build a service per sender_email so multi-account tracking works
+        service_cache = {}
+
+        def _get_service_for(email):
+            if email in service_cache:
+                return service_cache[email]
+            token_path = TOKENS_DIR / f'{email}.json'
+            if not token_path.exists():
+                return None
+            try:
+                creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+                if creds.expired and creds.refresh_token:
+                    creds.refresh(Request())
+                svc = build('gmail', 'v1', credentials=creds)
+                service_cache[email] = svc
+                return svc
+            except Exception:
+                return None
 
         for entry in log['emails']:
             if entry.get('reply_status') != 'NO_REPLY' or entry.get('status') != 'SENT':
@@ -425,9 +444,15 @@ def api_track():
             if not thread_id:
                 continue
 
+            # Use the account that sent this email for tracking
+            entry_sender = entry.get('sender_email') or sender_email
+            svc = _get_service_for(entry_sender)
+            if not svc:
+                continue
+
             # Check thread for replies
             try:
-                thread = service.users().threads().get(
+                thread = svc.users().threads().get(
                     userId='me', id=thread_id, format='metadata',
                     metadataHeaders=['From']
                 ).execute()
@@ -437,7 +462,7 @@ def api_track():
                     for msg in messages[1:]:
                         headers = msg.get('payload', {}).get('headers', [])
                         for h in headers:
-                            if h['name'].lower() == 'from' and sender_email.lower() not in h['value'].lower():
+                            if h['name'].lower() == 'from' and entry_sender.lower() not in h['value'].lower():
                                 entry['reply_status'] = 'REPLIED'
                                 entry['reply_received_at'] = datetime.now().isoformat()
                                 updated += 1
@@ -451,7 +476,7 @@ def api_track():
             if entry['reply_status'] == 'NO_REPLY':
                 try:
                     q = f'from:mailer-daemon "{entry["email"]}"'
-                    results = service.users().messages().list(userId='me', q=q, maxResults=3).execute()
+                    results = svc.users().messages().list(userId='me', q=q, maxResults=3).execute()
                     if results.get('resultSizeEstimate', 0) > 0:
                         entry['reply_status'] = 'BOUNCED'
                         updated += 1

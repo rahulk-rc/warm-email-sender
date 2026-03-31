@@ -410,9 +410,10 @@
                                                     <tr>
                                                         <th className="px-4 py-2.5 text-left text-slate-400 font-medium">#</th>
                                                         <th className="px-4 py-2.5 text-left text-slate-400 font-medium">Name</th>
-                                                        <th className="px-4 py-2.5 text-left text-slate-400 font-medium">Email</th>
+                                                        <th className="px-4 py-2.5 text-left text-slate-400 font-medium">To</th>
                                                         <th className="px-4 py-2.5 text-left text-slate-400 font-medium">Subject</th>
-                                                        <th className="px-4 py-2.5 text-left text-slate-400 font-medium">Sent</th>
+                                                        <th className="px-4 py-2.5 text-left text-slate-400 font-medium">Sent From</th>
+                                                        <th className="px-4 py-2.5 text-left text-slate-400 font-medium">Date</th>
                                                         <th className="px-4 py-2.5 text-left text-slate-400 font-medium">Send</th>
                                                         <th className="px-4 py-2.5 text-left text-slate-400 font-medium">Reply</th>
                                                         <th className="px-4 py-2.5 text-left text-slate-400 font-medium">Reply Date</th>
@@ -425,6 +426,7 @@
                                                             <td className="px-4 py-2.5 text-white">{e.name}</td>
                                                             <td className="px-4 py-2.5 text-blue-400">{e.email}</td>
                                                             <td className="px-4 py-2.5 text-slate-300 max-w-xs truncate">{e.subject}</td>
+                                                            <td className="px-4 py-2.5 text-slate-400 text-xs">{e.sender_email || '—'}</td>
                                                             <td className="px-4 py-2.5 text-slate-400">{e.sent_date}</td>
                                                             <td className="px-4 py-2.5"><Badge status={e.status} /></td>
                                                             <td className="px-4 py-2.5"><Badge status={e.reply_status} /></td>
