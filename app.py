@@ -512,8 +512,7 @@ def oauth_start():
     )
     auth_url, state = flow.authorization_url(
         access_type='offline',
-        prompt='consent',
-        include_granted_scopes='true'
+        prompt='consent'
     )
     session['oauth_state'] = state
     session['code_verifier'] = flow.code_verifier  # Save PKCE verifier
