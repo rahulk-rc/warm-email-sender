@@ -73,6 +73,11 @@ app = Flask(__name__, static_folder=str(SCRIPT_DIR))
 app.secret_key = os.environ.get('SECRET_KEY', 'warm-email-sender-session-key-2026')
 CORS(app)
 
+# Railway terminates SSL at their load balancer — tell Flask to trust
+# the X-Forwarded-Proto header so request.is_secure returns True
+from werkzeug.middleware.proxy_fix import ProxyFix
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
+
 # ── Global state ────────────────────────────────────────────────────────
 
 gmail_service = None
