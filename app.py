@@ -482,8 +482,11 @@ def api_track():
 # ── OAuth Web Flow (for adding accounts via browser) ────────────────────
 
 def _get_redirect_uri():
-    """Build the OAuth redirect URI based on the request."""
-    return request.host_url.rstrip('/') + '/oauth/callback'
+    """Build the OAuth redirect URI based on the request. Force https on Railway."""
+    url = request.host_url.rstrip('/')
+    if 'railway.app' in url or os.environ.get('RAILWAY_ENVIRONMENT'):
+        url = url.replace('http://', 'https://')
+    return url + '/oauth/callback'
 
 
 @app.route('/setup')
