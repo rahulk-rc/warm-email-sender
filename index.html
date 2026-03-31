@@ -104,6 +104,7 @@
             const [log, setLog] = useState(null);
             const [tracking, setTracking] = useState(false);
             const [error, setError] = useState(null);
+            const [accounts, setAccounts] = useState([]);
             const fileRef = useRef();
             const pollRef = useRef();
 
@@ -111,7 +112,16 @@
             useEffect(() => {
                 fetchStatus();
                 fetchLog();
+                fetchAccounts();
             }, []);
+
+            async function fetchAccounts() {
+                try {
+                    const res = await fetch(`${API}/accounts`);
+                    const data = await res.json();
+                    setAccounts(data.accounts?.filter(a => a.valid) || []);
+                } catch (e) {}
+            }
 
             // Poll send status when sending
             useEffect(() => {
@@ -268,6 +278,28 @@
                         {/* ── SEND TAB ─────────────────────────────────────── */}
                         {tab === 'send' && (
                             <div className="space-y-4">
+                                {/* Sender Picker */}
+                                {accounts.length > 0 && !isSending && (
+                                    <div className="card p-4 flex items-center justify-between">
+                                        <div className="flex items-center gap-3">
+                                            <span className="text-sm text-slate-400">Send from:</span>
+                                            <select
+                                                value={status?.sender_email || ''}
+                                                onChange={async (e) => {
+                                                    const email = e.target.value;
+                                                    await switchAccount(email);
+                                                }}
+                                                className="bg-slate-800 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500"
+                                            >
+                                                {accounts.map(acc => (
+                                                    <option key={acc.email} value={acc.email}>{acc.email}</option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                        <a href="/setup" className="text-xs text-blue-400 hover:text-blue-300 transition">+ Add Account</a>
+                                    </div>
+                                )}
+
                                 {/* Upload Zone */}
                                 {!isSending && (
                                     <div
@@ -296,7 +328,10 @@
                                 {recipients.length > 0 && !isSending && (
                                     <div className="card overflow-hidden">
                                         <div className="p-4 border-b border-slate-700 flex justify-between items-center">
-                                            <h2 className="font-semibold text-white">Preview — {recipients.length} recipients</h2>
+                                            <div>
+                                                <h2 className="font-semibold text-white">Preview — {recipients.length} recipients</h2>
+                                                {status?.sender_email && <p className="text-xs text-slate-400 mt-0.5">Sending from <span className="text-blue-400">{status.sender_email}</span></p>}
+                                            </div>
                                             <div className="flex gap-2">
                                                 <button onClick={() => { setRecipients([]); setUploadErrors([]); }} className="px-3 py-1.5 text-sm text-slate-400 hover:text-white transition">
                                                     Clear
