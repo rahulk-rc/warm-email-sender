@@ -516,6 +516,7 @@ def oauth_start():
         include_granted_scopes='true'
     )
     session['oauth_state'] = state
+    session['code_verifier'] = flow.code_verifier  # Save PKCE verifier
     return redirect(auth_url)
 
 
@@ -528,6 +529,7 @@ def oauth_callback():
             scopes=SCOPES,
             redirect_uri=_get_redirect_uri()
         )
+        flow.code_verifier = session.get('code_verifier')  # Restore PKCE verifier
         flow.fetch_token(authorization_response=request.url)
         creds = flow.credentials
 
