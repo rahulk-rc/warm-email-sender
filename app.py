@@ -161,11 +161,16 @@ def save_log(log):
         json.dump(log, f, indent=2, ensure_ascii=False)
 
 
-def get_today_count():
-    """Count emails sent today."""
+def get_today_count(for_sender=None):
+    """Count emails sent today, optionally per sender account."""
     log = load_log()
     today = datetime.now().strftime('%Y-%m-%d')
-    return sum(1 for e in log['emails'] if e.get('sent_date') == today and e.get('status') == 'SENT')
+    return sum(
+        1 for e in log['emails']
+        if e.get('sent_date') == today
+        and e.get('status') == 'SENT'
+        and (for_sender is None or e.get('sender_email', '') == for_sender)
+    )
 
 
 # ── UI Route ────────────────────────────────────────────────────────────
@@ -182,7 +187,13 @@ def api_status():
     """Return auth status and daily counts. Always returns 200 for healthcheck."""
     try:
         service = get_service()
-        today_count = get_today_count()
+        today_count = get_today_count(sender_email)
+        # Per-account usage for all connected accounts
+        account_usage = {}
+        for token_file in TOKENS_DIR.glob('*.json'):
+            acct = token_file.stem
+            acct_count = get_today_count(acct)
+            account_usage[acct] = {"sent": acct_count, "remaining": DAILY_SEND_LIMIT - acct_count}
         return jsonify({
             "authenticated": True,
             "sender_email": sender_email,
@@ -190,6 +201,7 @@ def api_status():
             "daily_limit": DAILY_SEND_LIMIT,
             "remaining": DAILY_SEND_LIMIT - today_count,
             "is_sending": send_status['is_sending'],
+            "account_usage": account_usage,
         })
     except Exception as e:
         return jsonify({
@@ -287,7 +299,7 @@ def api_upload():
             "recipients": recipients,
             "count": len(recipients),
             "errors": errors,
-            "remaining_today": DAILY_SEND_LIMIT - get_today_count(),
+            "remaining_today": DAILY_SEND_LIMIT - get_today_count(sender_email),
         })
 
     except Exception as e:
@@ -308,12 +320,23 @@ def api_send():
     if not recipients:
         return jsonify({"error": "No recipients provided"}), 400
 
-    remaining = DAILY_SEND_LIMIT - get_today_count()
-    if remaining <= 0:
-        return jsonify({"error": "Daily limit reached"}), 429
+    # Check per-account limits and filter out recipients over limit
+    account_sent = {}  # track how many we're queuing per account
+    filtered = []
+    skipped = []
+    for r in recipients:
+        acct = r.get('sender_email', '').strip() or sender_email or 'unknown'
+        already = get_today_count(acct) + account_sent.get(acct, 0)
+        if already >= DAILY_SEND_LIMIT:
+            skipped.append(f"{r['email']} — {acct} hit daily limit ({DAILY_SEND_LIMIT})")
+            continue
+        account_sent[acct] = account_sent.get(acct, 0) + 1
+        filtered.append(r)
 
-    if len(recipients) > remaining:
-        recipients = recipients[:remaining]
+    recipients = filtered
+    if not recipients:
+        return jsonify({"error": "All recipients skipped — sender accounts hit daily limit",
+                        "skipped": skipped}), 429
 
     # Start background send
     send_thread = threading.Thread(target=_send_worker, args=(recipients,), daemon=True)
