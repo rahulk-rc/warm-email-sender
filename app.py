@@ -190,10 +190,13 @@ def api_status():
         today_count = get_today_count(sender_email)
         # Per-account usage for all connected accounts
         account_usage = {}
-        for token_file in TOKENS_DIR.glob('*.json'):
-            acct = token_file.stem
-            acct_count = get_today_count(acct)
-            account_usage[acct] = {"sent": acct_count, "remaining": DAILY_SEND_LIMIT - acct_count}
+        try:
+            for token_file in TOKENS_DIR.glob('*.json'):
+                acct = token_file.stem
+                acct_count = get_today_count(acct)
+                account_usage[acct] = {"sent": acct_count, "remaining": DAILY_SEND_LIMIT - acct_count}
+        except Exception:
+            pass
         return jsonify({
             "authenticated": True,
             "sender_email": sender_email,
