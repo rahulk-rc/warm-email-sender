@@ -312,7 +312,7 @@
                                         <input ref={fileRef} type="file" accept=".csv" className="hidden" onChange={(e) => handleUpload(e.target.files[0])} />
                                         <div className="text-4xl mb-3">📧</div>
                                         <div className="text-lg font-medium text-slate-300">Drop CSV here or click to upload</div>
-                                        <div className="text-sm text-slate-500 mt-1">Columns: Name, Email, Subject, Body, CC (optional), BCC (optional)</div>
+                                        <div className="text-sm text-slate-500 mt-1">Columns: Name, Email, Subject, Body, Sender Email (optional), CC, BCC</div>
                                     </div>
                                 )}
 
@@ -347,8 +347,9 @@
                                                     <tr>
                                                         <th className="px-4 py-2.5 text-left text-slate-400 font-medium">#</th>
                                                         <th className="px-4 py-2.5 text-left text-slate-400 font-medium">Name</th>
-                                                        <th className="px-4 py-2.5 text-left text-slate-400 font-medium">Email</th>
+                                                        <th className="px-4 py-2.5 text-left text-slate-400 font-medium">To</th>
                                                         <th className="px-4 py-2.5 text-left text-slate-400 font-medium">Subject</th>
+                                                        <th className="px-4 py-2.5 text-left text-slate-400 font-medium">Send From</th>
                                                         <th className="px-4 py-2.5 text-left text-slate-400 font-medium">Body Preview</th>
                                                     </tr>
                                                 </thead>
@@ -359,6 +360,7 @@
                                                             <td className="px-4 py-2.5 text-white">{r.name}</td>
                                                             <td className="px-4 py-2.5 text-blue-400">{r.email}</td>
                                                             <td className="px-4 py-2.5 text-slate-300">{r.subject}</td>
+                                                            <td className="px-4 py-2.5 text-slate-400 text-xs">{r.sender_email || status?.sender_email || '—'}</td>
                                                             <td className="px-4 py-2.5 text-slate-400 max-w-xs truncate">{r.body.substring(0, 80)}...</td>
                                                         </tr>
                                                     ))}

@@ -232,12 +232,20 @@ def api_upload():
                                 "found_columns": list(reader.fieldnames)}), 400
             col_map[canonical] = found
 
-        for opt in ['cc', 'bcc']:
-            found = header_map.get(opt)
+        for opt in ['cc', 'bcc', 'sender_email']:
+            search_keys = [opt] if opt != 'sender_email' else ['sender_email', 'sender', 'from', 'send_from']
+            found = None
+            for sk in search_keys:
+                found = header_map.get(sk)
+                if found:
+                    break
             if not found:
                 for h_lower, h_orig in header_map.items():
-                    if opt in h_lower:
-                        found = h_orig
+                    for sk in search_keys:
+                        if sk in h_lower:
+                            found = h_orig
+                            break
+                    if found:
                         break
             col_map[opt] = found
 
@@ -250,6 +258,7 @@ def api_upload():
             body = (row.get(col_map['body']) or '').strip()
             cc = (row.get(col_map.get('cc', ''), '') or '').strip() if col_map.get('cc') else ''
             bcc = (row.get(col_map.get('bcc', ''), '') or '').strip() if col_map.get('bcc') else ''
+            row_sender = (row.get(col_map.get('sender_email', ''), '') or '').strip() if col_map.get('sender_email') else ''
 
             if not email or '@' not in email:
                 errors.append(f"Row {i}: invalid or missing email")
@@ -257,6 +266,11 @@ def api_upload():
             if not subject or not body:
                 errors.append(f"Row {i}: missing subject or body")
                 continue
+
+            # Validate sender if specified
+            if row_sender and not (TOKENS_DIR / f'{row_sender}.json').exists():
+                errors.append(f"Row {i}: sender '{row_sender}' is not a connected account — will use active account")
+                row_sender = ''
 
             recipients.append({
                 "row": i,
@@ -266,6 +280,7 @@ def api_upload():
                 "body": body,
                 "cc": cc,
                 "bcc": bcc,
+                "sender_email": row_sender,
             })
 
         return jsonify({
@@ -322,17 +337,47 @@ def _send_worker(recipients):
         "next_send_in": 0,
     }
 
-    service = get_service()
     log = load_log()
-    domain = sender_email.split('@')[1]
+
+    # Build a service cache for per-row sender accounts
+    service_cache = {}
+
+    def _get_sender_service(email_addr):
+        """Get Gmail service for a specific sender. Falls back to active account."""
+        if email_addr in service_cache:
+            return service_cache[email_addr], email_addr
+        token_path = TOKENS_DIR / f'{email_addr}.json'
+        if token_path.exists():
+            try:
+                creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+                if creds.expired and creds.refresh_token:
+                    creds.refresh(Request())
+                    with open(token_path, 'w') as f:
+                        f.write(creds.to_json())
+                svc = build('gmail', 'v1', credentials=creds)
+                service_cache[email_addr] = svc
+                return svc, email_addr
+            except Exception:
+                pass
+        # Fallback to active account
+        return get_service(), sender_email
 
     for i, r in enumerate(recipients):
         send_status['current'] = i + 1
 
         try:
+            # Use per-row sender if specified, otherwise active account
+            row_sender = r.get('sender_email', '').strip()
+            if row_sender:
+                svc, actual_sender = _get_sender_service(row_sender)
+            else:
+                svc, actual_sender = get_service(), sender_email
+
+            domain = actual_sender.split('@')[1]
+
             msg = MIMEText(r['body'], 'plain')
             msg['To'] = formataddr((r['name'], r['email']))
-            msg['From'] = sender_email
+            msg['From'] = actual_sender
             msg['Subject'] = r['subject']
             if r.get('cc'):
                 msg['Cc'] = r['cc']
@@ -341,7 +386,7 @@ def _send_worker(recipients):
             msg['Message-ID'] = make_msgid(domain=domain)
 
             raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-            result = service.users().messages().send(userId='me', body={'raw': raw}).execute()
+            result = svc.users().messages().send(userId='me', body={'raw': raw}).execute()
 
             now = datetime.now()
             entry = {
@@ -350,7 +395,7 @@ def _send_worker(recipients):
                 "subject": r['subject'],
                 "cc": r.get('cc', ''),
                 "bcc": r.get('bcc', ''),
-                "sender_email": sender_email,
+                "sender_email": actual_sender,
                 "gmail_message_id": result.get('id', ''),
                 "gmail_thread_id": result.get('threadId', ''),
                 "rfc_message_id": msg['Message-ID'],
