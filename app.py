@@ -481,6 +481,47 @@ def api_log():
     })
 
 
+@app.route('/api/export')
+def api_export():
+    """Export all sent emails as a CSV download."""
+    log = load_log()
+    emails = log.get('emails', [])
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        'Name', 'Recipient Email', 'Subject', 'Sender Email',
+        'CC', 'BCC', 'Sent Date', 'Sent At',
+        'Send Status', 'Reply Status', 'Reply Date', 'Last Checked',
+        'Gmail Message ID', 'Gmail Thread ID',
+    ])
+    for e in emails:
+        writer.writerow([
+            e.get('name', ''),
+            e.get('email', ''),
+            e.get('subject', ''),
+            e.get('sender_email', ''),
+            e.get('cc', ''),
+            e.get('bcc', ''),
+            e.get('sent_date', ''),
+            e.get('sent_at', ''),
+            e.get('status', ''),
+            e.get('reply_status', ''),
+            (e.get('reply_received_at') or '')[:10],
+            (e.get('reply_checked_at') or '')[:10],
+            e.get('gmail_message_id', ''),
+            e.get('gmail_thread_id', ''),
+        ])
+
+    from flask import Response
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M')
+    return Response(
+        output.getvalue(),
+        mimetype='text/csv',
+        headers={'Content-Disposition': f'attachment; filename=email_log_{timestamp}.csv'}
+    )
+
+
 @app.route('/api/track', methods=['POST'])
 def api_track():
     """Run reply tracker and return updated log."""
