@@ -419,6 +419,7 @@ def _send_worker(recipients):
                 "name": r['name'],
                 "email": r['email'],
                 "subject": r['subject'],
+                "body": r.get('body', ''),
                 "cc": r.get('cc', ''),
                 "bcc": r.get('bcc', ''),
                 "sender_email": actual_sender,
@@ -490,7 +491,7 @@ def api_export():
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow([
-        'Name', 'Recipient Email', 'Subject', 'Sender Email',
+        'Name', 'Recipient Email', 'Subject', 'Body', 'Sender Email',
         'CC', 'BCC', 'Sent Date', 'Sent At',
         'Send Status', 'Reply Status', 'Reply Date', 'Last Checked',
         'Gmail Message ID', 'Gmail Thread ID',
@@ -500,6 +501,7 @@ def api_export():
             e.get('name', ''),
             e.get('email', ''),
             e.get('subject', ''),
+            e.get('body', ''),
             e.get('sender_email', ''),
             e.get('cc', ''),
             e.get('bcc', ''),
