@@ -530,6 +530,7 @@ def api_track():
     try:
         log = load_log()
         updated = 0
+        track_errors = []
 
         # Build a service per sender_email so multi-account tracking works
         service_cache = {}
@@ -562,9 +563,11 @@ def api_track():
             entry_sender = entry.get('sender_email') or sender_email
             svc = _get_service_for(entry_sender)
             if not svc:
+                track_errors.append(f"{entry_sender}: token missing or expired — cannot check replies")
                 continue
 
             # Check 1: Thread-based — look for replies in the same thread
+            #          Search in:anywhere to catch replies that land in spam
             try:
                 thread = svc.users().threads().get(
                     userId='me', id=thread_id, format='metadata',
@@ -583,37 +586,41 @@ def api_track():
                                 break
                         if entry['reply_status'] == 'REPLIED':
                             break
-            except Exception:
-                pass
+            except Exception as e:
+                track_errors.append(f"{entry_sender}: thread check failed for {entry.get('email')} — {e}")
 
-            # Check 2: Search-based — reply may land as a new thread
+            # Check 2: Search-based — reply may land as a new thread or in spam
+            #          Require subject match to avoid false positives from unrelated emails
             if entry['reply_status'] == 'NO_REPLY':
                 try:
                     recipient = entry.get('email', '')
                     subject = entry.get('subject', '')
                     sent_date = entry.get('sent_date', '')
-                    # Search inbox for messages from this recipient after send date
-                    q = f'from:{recipient} after:{sent_date}'
-                    if subject:
-                        # Also try matching subject
-                        q_with_subj = f'from:{recipient} subject:"{subject[:40]}" after:{sent_date}'
-                        results = svc.users().messages().list(userId='me', q=q_with_subj, maxResults=5).execute()
-                        if not results.get('messages'):
-                            results = svc.users().messages().list(userId='me', q=q, maxResults=5).execute()
-                    else:
-                        results = svc.users().messages().list(userId='me', q=q, maxResults=5).execute()
 
-                    if results.get('messages'):
-                        entry['reply_status'] = 'REPLIED'
-                        entry['reply_received_at'] = datetime.now().isoformat()
-                        updated += 1
-                except Exception:
-                    pass
+                    if subject and recipient:
+                        # Search everywhere (inbox + spam) — require subject match
+                        # Use Re: prefix since most replies add it
+                        clean_subj = subject[:40].replace('"', '')
+                        queries = [
+                            f'from:{recipient} subject:"{clean_subj}" in:anywhere after:{sent_date}',
+                            f'from:{recipient} subject:"Re: {clean_subj}" in:anywhere after:{sent_date}',
+                        ]
+                        found = False
+                        for q in queries:
+                            results = svc.users().messages().list(userId='me', q=q, maxResults=3).execute()
+                            if results.get('messages'):
+                                entry['reply_status'] = 'REPLIED'
+                                entry['reply_received_at'] = datetime.now().isoformat()
+                                updated += 1
+                                found = True
+                                break
+                except Exception as e:
+                    track_errors.append(f"{entry_sender}: search failed for {entry.get('email')} — {e}")
 
-            # Bounce check
+            # Check 3: Bounce detection
             if entry['reply_status'] == 'NO_REPLY':
                 try:
-                    q = f'from:mailer-daemon "{entry["email"]}"'
+                    q = f'(from:mailer-daemon OR from:postmaster) "{entry["email"]}" in:anywhere after:{entry.get("sent_date", "")}'
                     results = svc.users().messages().list(userId='me', q=q, maxResults=3).execute()
                     if results.get('resultSizeEstimate', 0) > 0:
                         entry['reply_status'] = 'BOUNCED'
@@ -630,9 +637,13 @@ def api_track():
         replied = sum(1 for e in emails if e.get('reply_status') == 'REPLIED')
         bounced = sum(1 for e in emails if e.get('reply_status') == 'BOUNCED')
 
+        # Deduplicate errors
+        unique_errors = list(dict.fromkeys(track_errors))
+
         return jsonify({
             "message": f"Checked {len(log['emails'])} emails, updated {updated}",
             "updated": updated,
+            "errors": unique_errors,
             "emails": emails,
             "stats": {
                 "total": total,
