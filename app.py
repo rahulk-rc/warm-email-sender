@@ -564,7 +564,7 @@ def api_track():
             if not svc:
                 continue
 
-            # Check thread for replies
+            # Check 1: Thread-based — look for replies in the same thread
             try:
                 thread = svc.users().threads().get(
                     userId='me', id=thread_id, format='metadata',
@@ -585,6 +585,30 @@ def api_track():
                             break
             except Exception:
                 pass
+
+            # Check 2: Search-based — reply may land as a new thread
+            if entry['reply_status'] == 'NO_REPLY':
+                try:
+                    recipient = entry.get('email', '')
+                    subject = entry.get('subject', '')
+                    sent_date = entry.get('sent_date', '')
+                    # Search inbox for messages from this recipient after send date
+                    q = f'from:{recipient} after:{sent_date}'
+                    if subject:
+                        # Also try matching subject
+                        q_with_subj = f'from:{recipient} subject:"{subject[:40]}" after:{sent_date}'
+                        results = svc.users().messages().list(userId='me', q=q_with_subj, maxResults=5).execute()
+                        if not results.get('messages'):
+                            results = svc.users().messages().list(userId='me', q=q, maxResults=5).execute()
+                    else:
+                        results = svc.users().messages().list(userId='me', q=q, maxResults=5).execute()
+
+                    if results.get('messages'):
+                        entry['reply_status'] = 'REPLIED'
+                        entry['reply_received_at'] = datetime.now().isoformat()
+                        updated += 1
+                except Exception:
+                    pass
 
             # Bounce check
             if entry['reply_status'] == 'NO_REPLY':
