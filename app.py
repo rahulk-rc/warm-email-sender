@@ -351,104 +351,175 @@ def api_send():
     })
 
 
-def _send_worker(recipients):
-    """Background worker that sends emails with delays."""
+_log_lock = threading.Lock()
+_status_lock = threading.Lock()
+
+
+def _get_sender_service(email_addr, service_cache):
+    """Get Gmail service for a specific sender. Falls back to active account."""
+    if email_addr in service_cache:
+        return service_cache[email_addr], email_addr
+    token_path = TOKENS_DIR / f'{email_addr}.json'
+    if token_path.exists():
+        try:
+            creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+            if creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+                with open(token_path, 'w') as f:
+                    f.write(creds.to_json())
+            svc = build('gmail', 'v1', credentials=creds)
+            service_cache[email_addr] = svc
+            return svc, email_addr
+        except Exception:
+            pass
+    # Fallback to active account
+    return get_service(), sender_email
+
+
+def _send_one_email(r, svc, actual_sender, log):
+    """Send a single email and append to log. Returns (status, error_msg)."""
+    try:
+        domain = actual_sender.split('@')[1]
+
+        msg = MIMEText(r['body'], 'plain')
+        msg['To'] = formataddr((r['name'], r['email']))
+        msg['From'] = actual_sender
+        msg['Subject'] = r['subject']
+        if r.get('cc'):
+            msg['Cc'] = r['cc']
+        if r.get('bcc'):
+            msg['Bcc'] = r['bcc']
+        msg['Message-ID'] = make_msgid(domain=domain)
+
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        result = svc.users().messages().send(userId='me', body={'raw': raw}).execute()
+
+        now = datetime.now()
+        entry = {
+            "name": r['name'],
+            "email": r['email'],
+            "subject": r['subject'],
+            "body": r.get('body', ''),
+            "cc": r.get('cc', ''),
+            "bcc": r.get('bcc', ''),
+            "sender_email": actual_sender,
+            "gmail_message_id": result.get('id', ''),
+            "gmail_thread_id": result.get('threadId', ''),
+            "rfc_message_id": msg['Message-ID'],
+            "sent_date": now.strftime('%Y-%m-%d'),
+            "sent_at": now.isoformat(),
+            "status": "SENT",
+            "reply_status": "NO_REPLY",
+            "reply_checked_at": None,
+            "reply_received_at": None,
+        }
+        with _log_lock:
+            log['emails'].append(entry)
+            save_log(log)
+        return "SENT", None
+    except Exception as e:
+        return "FAILED", str(e)
+
+
+def _account_worker(account_email, recipient_list, log, service_cache):
+    """Send all emails for one account sequentially with delays."""
     global send_status
+
+    for idx, r in enumerate(recipient_list):
+        # Resolve the actual sender
+        row_sender = r.get('sender_email', '').strip()
+        if row_sender:
+            svc, actual_sender = _get_sender_service(row_sender, service_cache)
+        else:
+            svc, actual_sender = get_service(), sender_email
+
+        status, error = _send_one_email(r, svc, actual_sender, log)
+
+        # Update global status atomically
+        with _status_lock:
+            send_status['current'] += 1
+            result_entry = {
+                "email": r['email'],
+                "name": r['name'],
+                "status": status,
+                "sender_email": actual_sender,
+            }
+            if error:
+                result_entry['error'] = error
+            send_status['results'].append(result_entry)
+
+            # Update per-account status
+            acct_status = send_status['accounts'].get(account_email, {})
+            acct_status['current'] = idx + 1
+            if status == "SENT":
+                acct_status['sent'] = acct_status.get('sent', 0) + 1
+            else:
+                acct_status['failed'] = acct_status.get('failed', 0) + 1
+            send_status['accounts'][account_email] = acct_status
+
+        # Delay between sends for this account only (skip after last)
+        if idx < len(recipient_list) - 1:
+            delay = random.randint(MIN_DELAY_SECONDS, MAX_DELAY_SECONDS)
+            with _status_lock:
+                send_status['accounts'][account_email]['next_send_in'] = delay
+            for remaining in range(delay, 0, -1):
+                with _status_lock:
+                    send_status['accounts'][account_email]['next_send_in'] = remaining
+                time.sleep(1)
+            with _status_lock:
+                send_status['accounts'][account_email]['next_send_in'] = 0
+
+    # Mark this account as finished
+    with _status_lock:
+        send_status['accounts'][account_email]['done'] = True
+
+
+def _send_worker(recipients):
+    """Background orchestrator — spawns one thread per sender account."""
+    global send_status
+
+    # Group recipients by sender account
+    groups = {}
+    for r in recipients:
+        acct = r.get('sender_email', '').strip() or sender_email or 'unknown'
+        groups.setdefault(acct, []).append(r)
 
     send_status = {
         "is_sending": True,
         "current": 0,
         "total": len(recipients),
         "results": [],
-        "next_send_in": 0,
+        "next_send_in": 0,  # kept for backward compat
+        "accounts": {
+            acct: {
+                "total": len(rs),
+                "current": 0,
+                "sent": 0,
+                "failed": 0,
+                "next_send_in": 0,
+                "done": False,
+            }
+            for acct, rs in groups.items()
+        },
     }
 
     log = load_log()
-
-    # Build a service cache for per-row sender accounts
     service_cache = {}
 
-    def _get_sender_service(email_addr):
-        """Get Gmail service for a specific sender. Falls back to active account."""
-        if email_addr in service_cache:
-            return service_cache[email_addr], email_addr
-        token_path = TOKENS_DIR / f'{email_addr}.json'
-        if token_path.exists():
-            try:
-                creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
-                if creds.expired and creds.refresh_token:
-                    creds.refresh(Request())
-                    with open(token_path, 'w') as f:
-                        f.write(creds.to_json())
-                svc = build('gmail', 'v1', credentials=creds)
-                service_cache[email_addr] = svc
-                return svc, email_addr
-            except Exception:
-                pass
-        # Fallback to active account
-        return get_service(), sender_email
+    # Spawn one thread per account — they all run in parallel
+    threads = []
+    for acct, rs in groups.items():
+        t = threading.Thread(
+            target=_account_worker,
+            args=(acct, rs, log, service_cache),
+            daemon=True,
+        )
+        t.start()
+        threads.append(t)
 
-    for i, r in enumerate(recipients):
-        send_status['current'] = i + 1
-
-        try:
-            # Use per-row sender if specified, otherwise active account
-            row_sender = r.get('sender_email', '').strip()
-            if row_sender:
-                svc, actual_sender = _get_sender_service(row_sender)
-            else:
-                svc, actual_sender = get_service(), sender_email
-
-            domain = actual_sender.split('@')[1]
-
-            msg = MIMEText(r['body'], 'plain')
-            msg['To'] = formataddr((r['name'], r['email']))
-            msg['From'] = actual_sender
-            msg['Subject'] = r['subject']
-            if r.get('cc'):
-                msg['Cc'] = r['cc']
-            if r.get('bcc'):
-                msg['Bcc'] = r['bcc']
-            msg['Message-ID'] = make_msgid(domain=domain)
-
-            raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-            result = svc.users().messages().send(userId='me', body={'raw': raw}).execute()
-
-            now = datetime.now()
-            entry = {
-                "name": r['name'],
-                "email": r['email'],
-                "subject": r['subject'],
-                "body": r.get('body', ''),
-                "cc": r.get('cc', ''),
-                "bcc": r.get('bcc', ''),
-                "sender_email": actual_sender,
-                "gmail_message_id": result.get('id', ''),
-                "gmail_thread_id": result.get('threadId', ''),
-                "rfc_message_id": msg['Message-ID'],
-                "sent_date": now.strftime('%Y-%m-%d'),
-                "sent_at": now.isoformat(),
-                "status": "SENT",
-                "reply_status": "NO_REPLY",
-                "reply_checked_at": None,
-                "reply_received_at": None,
-            }
-            log['emails'].append(entry)
-            save_log(log)
-
-            send_status['results'].append({"email": r['email'], "name": r['name'], "status": "SENT"})
-
-        except Exception as e:
-            send_status['results'].append({"email": r['email'], "name": r['name'], "status": "FAILED", "error": str(e)})
-
-        # Delay between sends
-        if i < len(recipients) - 1:
-            delay = random.randint(MIN_DELAY_SECONDS, MAX_DELAY_SECONDS)
-            send_status['next_send_in'] = delay
-            for remaining in range(delay, 0, -1):
-                send_status['next_send_in'] = remaining
-                time.sleep(1)
-            send_status['next_send_in'] = 0
+    # Wait for all account threads to finish
+    for t in threads:
+        t.join()
 
     send_status['is_sending'] = False
 
