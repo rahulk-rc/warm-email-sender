@@ -595,6 +595,116 @@ def api_export():
     )
 
 
+def _extract_body(msg):
+    """Extract plain-text body from a Gmail message payload."""
+    import base64
+
+    def _decode(data):
+        try:
+            return base64.urlsafe_b64decode(data + '==').decode('utf-8', errors='replace')
+        except Exception:
+            return ''
+
+    payload = msg.get('payload', {})
+
+    # Multipart — walk parts looking for text/plain
+    def _find_plain(part):
+        mime = part.get('mimeType', '')
+        if mime == 'text/plain':
+            return _decode(part.get('body', {}).get('data', ''))
+        for sub in part.get('parts', []):
+            result = _find_plain(sub)
+            if result:
+                return result
+        return ''
+
+    body = _find_plain(payload)
+    if body:
+        return body.strip()
+
+    # Fallback: snipped
+    return msg.get('snippet', '')
+
+
+@app.route('/api/replies')
+def api_replies():
+    """Return reply bodies for all emails with reply_status=REPLIED."""
+    log = load_log()
+    replied = []
+
+    for entry in log['emails']:
+        if entry.get('reply_status') != 'REPLIED':
+            continue
+
+        # If body already stored in log, return it directly
+        if entry.get('reply_body'):
+            replied.append({
+                'name': entry['name'],
+                'email': entry['email'],
+                'subject': entry['subject'],
+                'sender_email': entry.get('sender_email', ''),
+                'sent_date': entry.get('sent_date', ''),
+                'reply_from': entry.get('reply_from', entry['email']),
+                'reply_received_at': entry.get('reply_received_at', ''),
+                'reply_body': entry['reply_body'],
+            })
+            continue
+
+        # Fetch body live from Gmail
+        entry_sender = entry.get('sender_email') or sender_email
+        thread_id = entry.get('gmail_thread_id')
+        if not thread_id:
+            continue
+
+        try:
+            token_path = TOKENS_DIR / f'{entry_sender}.json'
+            if not token_path.exists():
+                continue
+            creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+            if creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            svc = build('gmail', 'v1', credentials=creds)
+
+            thread = svc.users().threads().get(
+                userId='me', id=thread_id, format='full'
+            ).execute()
+
+            messages = thread.get('messages', [])
+            for msg in messages[1:]:
+                headers = msg.get('payload', {}).get('headers', [])
+                from_val = next((h['value'] for h in headers if h['name'].lower() == 'from'), '')
+                if entry_sender.lower() not in from_val.lower():
+                    body = _extract_body(msg)
+                    # Cache in log
+                    entry['reply_body'] = body
+                    entry['reply_from'] = from_val
+                    replied.append({
+                        'name': entry['name'],
+                        'email': entry['email'],
+                        'subject': entry['subject'],
+                        'sender_email': entry_sender,
+                        'sent_date': entry.get('sent_date', ''),
+                        'reply_from': from_val,
+                        'reply_received_at': entry.get('reply_received_at', ''),
+                        'reply_body': body,
+                    })
+                    break
+        except Exception as e:
+            replied.append({
+                'name': entry['name'],
+                'email': entry['email'],
+                'subject': entry['subject'],
+                'sender_email': entry_sender,
+                'sent_date': entry.get('sent_date', ''),
+                'reply_from': entry.get('reply_from', ''),
+                'reply_received_at': entry.get('reply_received_at', ''),
+                'reply_body': f'[Error fetching body: {e}]',
+            })
+
+    save_log(log)
+    return jsonify({'replies': replied, 'count': len(replied)})
+
+
 @app.route('/api/track', methods=['POST'])
 def api_track():
     """Run reply tracker and return updated log."""
@@ -641,7 +751,7 @@ def api_track():
             #          Search in:anywhere to catch replies that land in spam
             try:
                 thread = svc.users().threads().get(
-                    userId='me', id=thread_id, format='metadata',
+                    userId='me', id=thread_id, format='full',
                     metadataHeaders=['From']
                 ).execute()
 
@@ -653,6 +763,8 @@ def api_track():
                             if h['name'].lower() == 'from' and entry_sender.lower() not in h['value'].lower():
                                 entry['reply_status'] = 'REPLIED'
                                 entry['reply_received_at'] = datetime.now().isoformat()
+                                entry['reply_body'] = _extract_body(msg)
+                                entry['reply_from'] = h['value']
                                 updated += 1
                                 break
                         if entry['reply_status'] == 'REPLIED':
@@ -680,8 +792,15 @@ def api_track():
                         for q in queries:
                             results = svc.users().messages().list(userId='me', q=q, maxResults=3).execute()
                             if results.get('messages'):
+                                # Fetch full message to get body
+                                msg_id = results['messages'][0]['id']
+                                msg = svc.users().messages().get(userId='me', id=msg_id, format='full').execute()
+                                headers = msg.get('payload', {}).get('headers', [])
+                                from_val = next((h['value'] for h in headers if h['name'].lower() == 'from'), '')
                                 entry['reply_status'] = 'REPLIED'
                                 entry['reply_received_at'] = datetime.now().isoformat()
+                                entry['reply_body'] = _extract_body(msg)
+                                entry['reply_from'] = from_val
                                 updated += 1
                                 found = True
                                 break
