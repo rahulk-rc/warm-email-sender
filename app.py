@@ -626,6 +626,116 @@ def _extract_body(msg):
     return msg.get('snippet', '')
 
 
+def _validate_email(email):
+    """
+    Two-step email validation:
+    1. MX record check — domain can receive mail
+    2. SMTP RCPT TO check — mailbox exists on the server
+
+    Returns dict: { email, valid, reason, method }
+    """
+    import smtplib
+    import socket
+
+    try:
+        import dns.resolver
+        DNS_AVAILABLE = True
+    except ImportError:
+        DNS_AVAILABLE = False
+
+    result = {'email': email, 'valid': None, 'reason': '', 'method': ''}
+
+    # Basic format check
+    if '@' not in email or '.' not in email.split('@')[-1]:
+        result.update({'valid': False, 'reason': 'Invalid email format', 'method': 'format'})
+        return result
+
+    domain = email.split('@')[1].lower()
+
+    # Step 1: MX record lookup
+    mx_host = None
+    if DNS_AVAILABLE:
+        try:
+            records = dns.resolver.resolve(domain, 'MX')
+            mx_host = str(sorted(records, key=lambda r: r.preference)[0].exchange).rstrip('.')
+            result['method'] = 'mx+smtp'
+        except Exception as e:
+            result.update({'valid': False, 'reason': f'No MX records for domain: {domain}', 'method': 'mx'})
+            return result
+    else:
+        # Fallback: try domain directly as MX
+        mx_host = domain
+        result['method'] = 'smtp'
+
+    # Step 2: SMTP RCPT TO check
+    try:
+        smtp = smtplib.SMTP(timeout=10)
+        smtp.connect(mx_host, 25)
+        smtp.helo('rapidclaims.ai')
+        smtp.mail('verify@rapidclaims.ai')
+        code, msg = smtp.rcpt(email)
+        smtp.quit()
+
+        msg_str = msg.decode('utf-8', errors='replace') if isinstance(msg, bytes) else str(msg)
+
+        if code == 250:
+            result.update({'valid': True, 'reason': 'Mailbox exists'})
+        elif code == 251:
+            result.update({'valid': True, 'reason': 'Address will be forwarded'})
+        elif code in (550, 551, 552, 553, 554):
+            result.update({'valid': False, 'reason': f'Mailbox does not exist ({code}): {msg_str[:120]}'})
+        else:
+            # 252 = server can't verify but will try, 450/451 = temp error
+            # Treat as unknown — don't block sending
+            result.update({'valid': None, 'reason': f'Server could not verify ({code}) — unconfirmed'})
+
+    except smtplib.SMTPConnectError:
+        result.update({'valid': None, 'reason': 'SMTP connection refused — unconfirmed'})
+    except smtplib.SMTPServerDisconnected:
+        result.update({'valid': None, 'reason': 'Server disconnected early — unconfirmed'})
+    except socket.timeout:
+        result.update({'valid': None, 'reason': 'SMTP timeout — unconfirmed'})
+    except Exception as e:
+        result.update({'valid': None, 'reason': f'Could not verify: {str(e)[:100]}'})
+
+    return result
+
+
+@app.route('/api/validate', methods=['POST'])
+def api_validate():
+    """
+    Validate a list of email addresses via MX + SMTP checks.
+    Body: { "emails": ["a@b.com", ...] }
+    Returns per-email validation results.
+    """
+    data = request.json or {}
+    emails = data.get('emails', [])
+
+    if not emails:
+        return jsonify({'error': 'No emails provided'}), 400
+    if len(emails) > 100:
+        return jsonify({'error': 'Max 100 emails per request'}), 400
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    results = {}
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(_validate_email, email): email for email in emails}
+        for future in as_completed(futures):
+            r = future.result()
+            results[r['email']] = r
+
+    # Summary counts
+    valid = sum(1 for r in results.values() if r['valid'] is True)
+    invalid = sum(1 for r in results.values() if r['valid'] is False)
+    unknown = sum(1 for r in results.values() if r['valid'] is None)
+
+    return jsonify({
+        'results': results,
+        'summary': {'valid': valid, 'invalid': invalid, 'unknown': unknown, 'total': len(emails)}
+    })
+
+
 @app.route('/api/replies')
 def api_replies():
     """Return reply bodies for all emails with reply_status=REPLIED."""
