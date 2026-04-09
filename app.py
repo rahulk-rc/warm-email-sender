@@ -665,30 +665,66 @@ def api_replies():
                 creds.refresh(Request())
             svc = build('gmail', 'v1', credentials=creds)
 
-            thread = svc.users().threads().get(
-                userId='me', id=thread_id, format='full'
-            ).execute()
+            found_body = None
+            found_from = None
 
-            messages = thread.get('messages', [])
-            for msg in messages[1:]:
-                headers = msg.get('payload', {}).get('headers', [])
-                from_val = next((h['value'] for h in headers if h['name'].lower() == 'from'), '')
-                if entry_sender.lower() not in from_val.lower():
-                    body = _extract_body(msg)
-                    # Cache in log
-                    entry['reply_body'] = body
-                    entry['reply_from'] = from_val
-                    replied.append({
-                        'name': entry['name'],
-                        'email': entry['email'],
-                        'subject': entry['subject'],
-                        'sender_email': entry_sender,
-                        'sent_date': entry.get('sent_date', ''),
-                        'reply_from': from_val,
-                        'reply_received_at': entry.get('reply_received_at', ''),
-                        'reply_body': body,
-                    })
-                    break
+            # Check 1: look for reply in the original thread
+            try:
+                thread = svc.users().threads().get(
+                    userId='me', id=thread_id, format='full'
+                ).execute()
+                messages = thread.get('messages', [])
+                for msg in messages[1:]:
+                    headers = msg.get('payload', {}).get('headers', [])
+                    from_val = next((h['value'] for h in headers if h['name'].lower() == 'from'), '')
+                    if entry_sender.lower() not in from_val.lower():
+                        found_body = _extract_body(msg)
+                        found_from = from_val
+                        break
+            except Exception:
+                pass
+
+            # Check 2: search-based — reply may have arrived as a new thread
+            if not found_body:
+                try:
+                    recipient = entry.get('email', '')
+                    subject = entry.get('subject', '')
+                    sent_date = entry.get('sent_date', '')
+                    clean_subj = subject[:40].replace('"', '')
+                    queries = [
+                        f'from:{recipient} subject:"{clean_subj}" in:anywhere after:{sent_date}',
+                        f'from:{recipient} subject:"Re: {clean_subj}" in:anywhere after:{sent_date}',
+                        f'from:{recipient} in:anywhere after:{sent_date}',
+                    ]
+                    for q in queries:
+                        results = svc.users().messages().list(userId='me', q=q, maxResults=3).execute()
+                        if results.get('messages'):
+                            msg_id = results['messages'][0]['id']
+                            msg = svc.users().messages().get(userId='me', id=msg_id, format='full').execute()
+                            headers = msg.get('payload', {}).get('headers', [])
+                            from_val = next((h['value'] for h in headers if h['name'].lower() == 'from'), '')
+                            found_body = _extract_body(msg)
+                            found_from = from_val
+                            break
+                except Exception:
+                    pass
+
+            result = {
+                'name': entry['name'],
+                'email': entry['email'],
+                'subject': entry['subject'],
+                'sender_email': entry_sender,
+                'sent_date': entry.get('sent_date', ''),
+                'reply_from': found_from or entry.get('reply_from', entry['email']),
+                'reply_received_at': entry.get('reply_received_at', ''),
+                'reply_body': found_body or '[Reply detected but body could not be retrieved]',
+            }
+            # Cache in log
+            if found_body:
+                entry['reply_body'] = found_body
+                entry['reply_from'] = found_from
+            replied.append(result)
+
         except Exception as e:
             replied.append({
                 'name': entry['name'],
