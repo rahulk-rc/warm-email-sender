@@ -206,6 +206,46 @@
                 }
             }
 
+            function removeRecipient(email) {
+                setRecipients(prev => prev.filter(r => r.email !== email));
+                if (validation) {
+                    const newResults = { ...validation.results };
+                    delete newResults[email];
+                    const vals = Object.values(newResults);
+                    setValidation({
+                        results: newResults,
+                        summary: {
+                            valid: vals.filter(v => v.valid === true).length,
+                            invalid: vals.filter(v => v.valid === false).length,
+                            unknown: vals.filter(v => v.valid === null).length,
+                            total: vals.length,
+                        }
+                    });
+                }
+            }
+
+            function removeAllInvalid() {
+                const invalidEmails = new Set(
+                    Object.values(validation?.results || {}).filter(r => r.valid === false).map(r => r.email)
+                );
+                setRecipients(prev => prev.filter(r => !invalidEmails.has(r.email)));
+                if (validation) {
+                    const newResults = Object.fromEntries(
+                        Object.entries(validation.results).filter(([k]) => !invalidEmails.has(k))
+                    );
+                    const vals = Object.values(newResults);
+                    setValidation({
+                        results: newResults,
+                        summary: {
+                            valid: vals.filter(v => v.valid === true).length,
+                            invalid: 0,
+                            unknown: vals.filter(v => v.valid === null).length,
+                            total: vals.length,
+                        }
+                    });
+                }
+            }
+
             async function handleValidate() {
                 if (!recipients.length) return;
                 setValidating(true);
@@ -400,13 +440,14 @@
                                                             <th className="px-4 py-2.5 text-left text-slate-400 font-medium">Send From</th>
                                                             <th className="px-4 py-2.5 text-left text-slate-400 font-medium">Body Preview</th>
                                                             {validation && <th className="px-4 py-2.5 text-left text-slate-400 font-medium">Validation</th>}
+                                                            <th className="px-4 py-2.5"></th>
                                                         </tr>
                                                     </thead>
                                                     <tbody>
                                                         {recipients.map((r, i) => {
                                                             const v = validation?.results?.[r.email];
                                                             return (
-                                                                <tr key={i} className={`border-t border-slate-700/50 hover:bg-slate-800/30 ${v?.valid === false ? 'bg-red-900/10' : ''}`}>
+                                                                <tr key={i} className={`border-t border-slate-700/50 hover:bg-slate-800/30 group ${v?.valid === false ? 'bg-red-900/10' : ''}`}>
                                                                     <td className="px-4 py-2.5 text-slate-500">{i + 1}</td>
                                                                     <td className="px-4 py-2.5 text-white">{r.name}</td>
                                                                     <td className="px-4 py-2.5 text-blue-400">{r.email}</td>
@@ -417,12 +458,18 @@
                                                                         <td className="px-4 py-2.5">
                                                                             {!v && <span className="text-slate-500 text-xs">—</span>}
                                                                             {v?.valid === true && <span className="text-emerald-400 text-xs font-medium">✓ Valid</span>}
-                                                                            {v?.valid === false && (
-                                                                                <span className="text-red-400 text-xs font-medium" title={v.reason}>✗ Invalid</span>
-                                                                            )}
+                                                                            {v?.valid === false && <span className="text-red-400 text-xs font-medium" title={v.reason}>✗ Invalid</span>}
                                                                             {v?.valid === null && <span className="text-amber-400 text-xs font-medium" title={v?.reason}>? Unconfirmed</span>}
                                                                         </td>
                                                                     )}
+                                                                    <td className="px-3 py-2.5">
+                                                                        <button
+                                                                            onClick={() => removeRecipient(r.email)}
+                                                                            className="opacity-0 group-hover:opacity-100 text-slate-500 hover:text-red-400 transition text-lg leading-none"
+                                                                            title="Remove">
+                                                                            ×
+                                                                        </button>
+                                                                    </td>
                                                                 </tr>
                                                             );
                                                         })}
@@ -440,13 +487,18 @@
                                                     <span className="text-red-400 text-sm">✗ {validation.summary.invalid} invalid</span>
                                                     <span className="text-amber-400 text-sm">? {validation.summary.unknown} unconfirmed</span>
                                                     {validation.summary.invalid > 0 && (
-                                                        <span className="text-orange-300 text-xs ml-auto">⚠ {validation.summary.invalid} address{validation.summary.invalid > 1 ? 'es' : ''} will likely bounce — consider removing them before sending</span>
+                                                        <button onClick={removeAllInvalid}
+                                                                className="ml-auto px-3 py-1 text-xs font-medium bg-red-900/40 hover:bg-red-800/60 text-red-300 rounded-lg transition">
+                                                            ✕ Remove all invalid ({validation.summary.invalid})
+                                                        </button>
                                                     )}
                                                 </div>
-                                                {/* List invalid ones */}
+                                                {/* List invalid ones with individual remove */}
                                                 {Object.values(validation.results).filter(r => r.valid === false).map((r, i) => (
-                                                    <div key={i} className="mt-2 text-xs text-red-300 bg-red-900/20 rounded px-3 py-1.5">
-                                                        <span className="font-medium">{r.email}</span> — {r.reason}
+                                                    <div key={i} className="mt-2 text-xs text-red-300 bg-red-900/20 rounded px-3 py-1.5 flex items-center justify-between">
+                                                        <span><span className="font-medium">{r.email}</span> — {r.reason}</span>
+                                                        <button onClick={() => removeRecipient(r.email)}
+                                                                className="ml-4 text-red-400 hover:text-red-200 font-bold">✕</button>
                                                     </div>
                                                 ))}
                                             </div>
