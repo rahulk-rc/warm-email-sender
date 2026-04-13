@@ -1186,7 +1186,7 @@ def _fetch_message_details(svc, msg_id):
         'from': _get_header(headers, 'From'),
         'to': _get_header(headers, 'To'),
         'subject': _get_header(headers, 'Subject'),
-        'body': body[:600] if body else msg.get('snippet', ''),
+        'body': body if body else msg.get('snippet', ''),
     }
 
 
@@ -1254,36 +1254,61 @@ def api_analyze_domain():
             f"From: {e['from']}\n"
             f"To: {e['to']}\n"
             f"Subject: {e['subject']}\n"
-            f"Body excerpt: {e['body']}\n"
+            f"Body:\n{e['body']}\n"
         )
     email_block = '\n'.join(email_lines)
 
-    prompt = f"""You are analyzing the email history between the account owner and the domain "{domain}".
+    prompt = f"""You are a GTM and Product analyst reviewing the full email history between our team and the domain "{domain}".
 Below are {len(emails_sorted)} emails (sorted chronologically) exchanged with people at @{domain}.
 
 {email_block}
 
-Please provide a thorough analysis covering:
+Analyze these emails from a GTM and Product lens. Provide a structured debrief covering:
 
-1. **Relationship Overview** — Who are the key contacts at {domain}? What is the nature of the relationship (prospect, customer, partner, vendor, etc.)?
+## 1. Contact Registry
+For each person at @{domain} who appears in the emails:
+- Full name, email address, role/title (if inferrable)
+- Whether they are a decision-maker, implementer, or influencer
+- How actively they participated in the email threads
 
-2. **Key Topics & Themes** — What have the main discussions been about? Summarise the recurring topics, deals, projects, or issues discussed.
+## 2. Current Situation Assessment
+- What is the current status of this account? (active pilot, stalled, churned, prospect, etc.)
+- Relationship temperature — warm, cold, at risk?
+- When was the last meaningful interaction and what was it about?
 
-3. **Timeline & Milestones** — What are the notable moments or turning points in this relationship based on the email history?
+## 3. Implementation & Delivery Review
+- **Timeline & Pace**: Map out the key milestones. Were we delivering at an acceptable cadence? Were there gaps or delays?
+- **Quality Signals**: What indicators of satisfaction or dissatisfaction appeared? Any explicit feedback, complaints, or praise?
+- **Blockers & Friction**: What caused delays or friction? (technical issues, process bottlenecks, people dependencies, unclear requirements)
+- **Feature Requests**: Any product capabilities they asked for or wished existed?
 
-4. **Current Status** — Based on the most recent emails, where does this relationship stand today? Is it active, stalled, warm, cold?
+## 4. Specialty & EHR Intelligence
+- What specialty-specific workflow nuances were discussed? (e.g., coding patterns, claim types, denial reasons)
+- EHR-specific integration details, limitations, or requirements mentioned
+- Domain terminology, jargon, or context that demonstrates deep knowledge of their world
+- Any payer or regulatory nuances that came up
 
-5. **Sentiment & Tone** — How has the tone of communication evolved? Is the relationship positive, neutral, or showing signs of friction?
+## 5. GTM & Sales Learnings
+- What value propositions or claims resonated with them? What language did they respond positively to?
+- What objections or concerns were raised? How were they handled?
+- Are there proof points, metrics, or wins we can reference when prospecting similar accounts?
+- Any competitive mentions — incumbent tools, alternatives they considered?
 
-6. **Next Steps & Recommendations** — What are the most important actions to take with this account? Be specific and actionable.
+## 6. Pilot Experience Improvements
+- What should we do differently in future pilots based on this experience?
+- What went well that we should replicate?
+- What went poorly that we should fix?
 
-Keep your analysis concise but insightful. Reference specific email subjects or dates where relevant."""
+## 7. Next Steps
+Ranked by priority — specific, actionable recommendations for this account right now.
+
+Be thorough and reference specific emails (by date and subject) as evidence for your conclusions."""
 
     try:
         client = anthropic.Anthropic(api_key=api_key)
         message = client.messages.create(
             model='claude-sonnet-4-6',
-            max_tokens=2048,
+            max_tokens=4096,
             messages=[{'role': 'user', 'content': prompt}],
         )
         analysis_text = message.content[0].text
