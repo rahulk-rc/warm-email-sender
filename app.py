@@ -1131,6 +1131,174 @@ def api_remove_account():
     return jsonify({"error": "Account not found"}), 404
 
 
+# ── Domain Analysis ──────────────────────────────────────────────────────
+
+def _get_service_for_account(email_addr):
+    """Load and return a Gmail service for the given account email."""
+    token_path = TOKENS_DIR / f'{email_addr}.json'
+    if not token_path.exists():
+        raise ValueError(f"No token found for {email_addr}")
+    creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        with open(token_path, 'w') as f:
+            f.write(creds.to_json())
+    return build('gmail', 'v1', credentials=creds)
+
+
+def _fetch_domain_emails(svc, domain, max_emails=100):
+    """Fetch up to max_emails messages from/to a given domain."""
+    query = f'from:@{domain} OR to:@{domain}'
+    messages = []
+    page_token = None
+
+    while len(messages) < max_emails:
+        batch_size = min(50, max_emails - len(messages))
+        kwargs = dict(userId='me', q=query, maxResults=batch_size)
+        if page_token:
+            kwargs['pageToken'] = page_token
+        result = svc.users().messages().list(**kwargs).execute()
+        msgs = result.get('messages', [])
+        if not msgs:
+            break
+        messages.extend(msgs)
+        page_token = result.get('nextPageToken')
+        if not page_token:
+            break
+
+    return messages
+
+
+def _get_header(headers, name):
+    for h in headers:
+        if h['name'].lower() == name.lower():
+            return h['value']
+    return ''
+
+
+def _fetch_message_details(svc, msg_id):
+    """Fetch subject, from, to, date, and body snippet for a message."""
+    msg = svc.users().messages().get(userId='me', id=msg_id, format='full').execute()
+    headers = msg.get('payload', {}).get('headers', [])
+    body = _extract_body(msg)
+    return {
+        'date': _get_header(headers, 'Date'),
+        'from': _get_header(headers, 'From'),
+        'to': _get_header(headers, 'To'),
+        'subject': _get_header(headers, 'Subject'),
+        'body': body[:600] if body else msg.get('snippet', ''),
+    }
+
+
+@app.route('/api/analyze-domain', methods=['POST'])
+def api_analyze_domain():
+    """
+    Fetch all emails from/to a domain for a given account and
+    run a deep analysis via Claude.
+
+    Body: { "account": "me@gmail.com", "domain": "acme.com" }
+    """
+    import anthropic
+
+    data = request.json or {}
+    account = data.get('account', '').strip()
+    domain = data.get('domain', '').strip().lstrip('@').lower()
+
+    if not account or not domain:
+        return jsonify({"error": "account and domain are required"}), 400
+
+    api_key = os.environ.get('ANTHROPIC_API_KEY')
+    if not api_key:
+        return jsonify({"error": "ANTHROPIC_API_KEY environment variable not set"}), 500
+
+    try:
+        svc = _get_service_for_account(account)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        return jsonify({"error": f"Failed to load Gmail account: {e}"}), 500
+
+    # Fetch message list
+    try:
+        msg_refs = _fetch_domain_emails(svc, domain, max_emails=100)
+    except Exception as e:
+        return jsonify({"error": f"Gmail API error fetching messages: {e}"}), 500
+
+    if not msg_refs:
+        return jsonify({
+            "domain": domain,
+            "account": account,
+            "email_count": 0,
+            "analysis": f"No emails found from or to @{domain} in this account.",
+            "emails": [],
+        })
+
+    # Fetch full details for each message (cap at 80 to stay within token limits)
+    emails = []
+    for ref in msg_refs[:80]:
+        try:
+            details = _fetch_message_details(svc, ref['id'])
+            emails.append(details)
+        except Exception:
+            continue
+
+    # Sort chronologically
+    emails_sorted = sorted(emails, key=lambda e: e.get('date', ''))
+
+    # Build the context block for Claude
+    email_lines = []
+    for i, e in enumerate(emails_sorted, 1):
+        email_lines.append(
+            f"--- Email {i} ---\n"
+            f"Date: {e['date']}\n"
+            f"From: {e['from']}\n"
+            f"To: {e['to']}\n"
+            f"Subject: {e['subject']}\n"
+            f"Body excerpt: {e['body']}\n"
+        )
+    email_block = '\n'.join(email_lines)
+
+    prompt = f"""You are analyzing the email history between the account owner and the domain "{domain}".
+Below are {len(emails_sorted)} emails (sorted chronologically) exchanged with people at @{domain}.
+
+{email_block}
+
+Please provide a thorough analysis covering:
+
+1. **Relationship Overview** — Who are the key contacts at {domain}? What is the nature of the relationship (prospect, customer, partner, vendor, etc.)?
+
+2. **Key Topics & Themes** — What have the main discussions been about? Summarise the recurring topics, deals, projects, or issues discussed.
+
+3. **Timeline & Milestones** — What are the notable moments or turning points in this relationship based on the email history?
+
+4. **Current Status** — Based on the most recent emails, where does this relationship stand today? Is it active, stalled, warm, cold?
+
+5. **Sentiment & Tone** — How has the tone of communication evolved? Is the relationship positive, neutral, or showing signs of friction?
+
+6. **Next Steps & Recommendations** — What are the most important actions to take with this account? Be specific and actionable.
+
+Keep your analysis concise but insightful. Reference specific email subjects or dates where relevant."""
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model='claude-sonnet-4-6',
+            max_tokens=2048,
+            messages=[{'role': 'user', 'content': prompt}],
+        )
+        analysis_text = message.content[0].text
+    except Exception as e:
+        return jsonify({"error": f"Claude API error: {e}"}), 500
+
+    return jsonify({
+        "domain": domain,
+        "account": account,
+        "email_count": len(emails_sorted),
+        "analysis": analysis_text,
+        "emails": emails_sorted,
+    })
+
+
 # ── Migrate legacy data to DATA_DIR ─────────────────────────────────────
 
 def _migrate_legacy_data():
