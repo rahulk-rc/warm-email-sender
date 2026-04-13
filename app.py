@@ -1308,7 +1308,7 @@ Be thorough and reference specific emails (by date and subject) as evidence for 
         client = anthropic.Anthropic(api_key=api_key)
         message = client.messages.create(
             model='claude-sonnet-4-6',
-            max_tokens=4096,
+            max_tokens=16384,
             messages=[{'role': 'user', 'content': prompt}],
         )
         analysis_text = message.content[0].text
