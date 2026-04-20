@@ -20,8 +20,10 @@ import random
 import sys
 import time
 from datetime import datetime
+from email.message import EmailMessage
 from email.mime.text import MIMEText
 from email.utils import make_msgid, formataddr
+import email.policy
 from pathlib import Path
 
 
@@ -196,26 +198,18 @@ class WarmEmailSender:
         """Build a plain-text MIME message."""
         msg = MIMEText(recipient['body'], 'plain')
 
-        # Support multiple To addresses (comma/semicolon-separated)
         to_emails = _parse_email_list(recipient['email'])
-        if len(to_emails) == 1:
-            msg['To'] = formataddr((recipient['name'], to_emails[0]))
-        elif len(to_emails) > 1:
-            # Use bare addresses for multi-recipient To — Gmail API rejects
-            # mixed name+angle-bracket format when combined with bare addresses
-            msg['To'] = ', '.join(to_emails)
-        else:
-            msg['To'] = recipient['email']  # fallback
 
-        msg['From'] = self.sender_email
+        msg = EmailMessage()
         msg['Subject'] = recipient['subject']
-
+        msg['From'] = self.sender_email
+        msg['To'] = ', '.join(to_emails) if to_emails else recipient['email']
         if recipient.get('cc'):
-            msg['Cc'] = recipient['cc']   # already normalized comma-separated string
+            msg['Cc'] = recipient['cc']
         if recipient.get('bcc'):
             msg['Bcc'] = recipient['bcc']
-
         msg['Message-ID'] = make_msgid(domain=self.sender_domain)
+        msg.set_content(recipient['body'])
 
         return msg
 
@@ -224,7 +218,7 @@ class WarmEmailSender:
         msg = self._compose_message(recipient)
         message_id = msg['Message-ID']
 
-        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        raw = base64.urlsafe_b64encode(msg.as_bytes(policy=email.policy.SMTP)).decode()
 
         try:
             result = self.service.users().messages().send(

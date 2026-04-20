@@ -22,8 +22,10 @@ import sys
 import threading
 import time
 from datetime import datetime
+from email.message import EmailMessage
 from email.mime.text import MIMEText
 from email.utils import make_msgid, formataddr
+import email.policy
 from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory, redirect, session
@@ -401,27 +403,25 @@ def _send_one_email(r, svc, actual_sender, log):
     try:
         domain = actual_sender.split('@')[1]
 
-        msg = MIMEText(r['body'], 'plain')
-
-        # Support multiple To addresses (comma/semicolon-separated)
+        # Use EmailMessage with SMTP policy — produces proper RFC 2822 CRLF
+        # line endings and handles multi-address To/CC headers correctly.
+        # MIMEText/compat32 generates LF-only output which can cause Gmail API
+        # to reject multi-address headers as "Invalid To header".
         to_emails = _parse_email_list(r['email'])
         primary_email = to_emails[0] if to_emails else r['email']
-        if len(to_emails) == 1:
-            msg['To'] = formataddr((r['name'], to_emails[0]))
-        else:
-            # Use bare addresses for multi-recipient To — Gmail API rejects
-            # mixed name+angle-bracket format when combined with bare addresses
-            msg['To'] = ', '.join(to_emails)
 
-        msg['From'] = actual_sender
+        msg = EmailMessage()
         msg['Subject'] = r['subject']
+        msg['From'] = actual_sender
+        msg['To'] = ', '.join(to_emails)
         if r.get('cc'):
-            msg['Cc'] = r['cc']   # already normalized comma-separated string
+            msg['Cc'] = r['cc']
         if r.get('bcc'):
             msg['Bcc'] = r['bcc']
         msg['Message-ID'] = make_msgid(domain=domain)
+        msg.set_content(r['body'])
 
-        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        raw = base64.urlsafe_b64encode(msg.as_bytes(policy=email.policy.SMTP)).decode()
         result = svc.users().messages().send(userId='me', body={'raw': raw}).execute()
 
         now = datetime.now()
