@@ -409,8 +409,9 @@ def _send_one_email(r, svc, actual_sender, log):
         if len(to_emails) == 1:
             msg['To'] = formataddr((r['name'], to_emails[0]))
         else:
-            to_parts = [formataddr((r['name'], to_emails[0]))] + to_emails[1:]
-            msg['To'] = ', '.join(to_parts)
+            # Use bare addresses for multi-recipient To — Gmail API rejects
+            # mixed name+angle-bracket format when combined with bare addresses
+            msg['To'] = ', '.join(to_emails)
 
         msg['From'] = actual_sender
         msg['Subject'] = r['subject']

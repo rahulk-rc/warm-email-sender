@@ -201,8 +201,9 @@ class WarmEmailSender:
         if len(to_emails) == 1:
             msg['To'] = formataddr((recipient['name'], to_emails[0]))
         elif len(to_emails) > 1:
-            to_parts = [formataddr((recipient['name'], to_emails[0]))] + to_emails[1:]
-            msg['To'] = ', '.join(to_parts)
+            # Use bare addresses for multi-recipient To — Gmail API rejects
+            # mixed name+angle-bracket format when combined with bare addresses
+            msg['To'] = ', '.join(to_emails)
         else:
             msg['To'] = recipient['email']  # fallback
 
