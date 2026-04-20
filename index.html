@@ -211,11 +211,23 @@
                 }
             }
 
-            function removeRecipient(email) {
-                setRecipients(prev => prev.filter(r => r.email !== email));
+            // Parse a comma/semicolon-separated email string into an array
+            function parseEmailList(str) {
+                if (!str) return [];
+                return str.replace(/;/g, ',').split(',').map(e => e.trim()).filter(Boolean);
+            }
+
+            function removeRecipient(emailKey) {
+                // emailKey may be a single address or the full comma-separated To string
+                setRecipients(prev => prev.filter(r => {
+                    if (r.email === emailKey) return false;
+                    const rowEmails = parseEmailList(r.email);
+                    return !rowEmails.includes(emailKey);
+                }));
                 if (validation) {
+                    const toRemove = parseEmailList(emailKey);
                     const newResults = { ...validation.results };
-                    delete newResults[email];
+                    toRemove.forEach(e => delete newResults[e]);
                     const vals = Object.values(newResults);
                     setValidation({
                         results: newResults,
@@ -233,7 +245,11 @@
                 const invalidEmails = new Set(
                     Object.values(validation?.results || {}).filter(r => r.valid === false).map(r => r.email)
                 );
-                setRecipients(prev => prev.filter(r => !invalidEmails.has(r.email)));
+                // Remove a row if its primary (first) To address is invalid
+                setRecipients(prev => prev.filter(r => {
+                    const primary = parseEmailList(r.email)[0];
+                    return !invalidEmails.has(primary);
+                }));
                 if (validation) {
                     const newResults = Object.fromEntries(
                         Object.entries(validation.results).filter(([k]) => !invalidEmails.has(k))
@@ -256,7 +272,10 @@
                 setValidating(true);
                 setValidation(null);
                 try {
-                    const emails = recipients.map(r => r.email);
+                    // Flatten all individual emails from multi-address To fields
+                    const emails = [...new Set(
+                        recipients.flatMap(r => parseEmailList(r.email))
+                    )];
                     const res = await fetch(`${API}/validate`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -425,7 +444,7 @@
                                         <input ref={fileRef} type="file" accept=".csv" className="hidden" onChange={(e) => handleUpload(e.target.files[0])} />
                                         <div className="text-4xl mb-3">📧</div>
                                         <div className="text-lg font-medium text-slate-300">Drop CSV here or click to upload</div>
-                                        <div className="text-sm text-slate-500 mt-1">Columns: Name, Email, Subject, Body, Sender Email (optional), CC, BCC</div>
+                                        <div className="text-sm text-slate-500 mt-1">Columns: Name, Email, Subject, Body, Sender Email (optional), CC, BCC — To/CC/BCC support multiple addresses separated by commas</div>
                                     </div>
                                 )}
 
@@ -467,6 +486,7 @@
                                                             <th className="px-4 py-2.5 text-left text-slate-400 font-medium">#</th>
                                                             <th className="px-4 py-2.5 text-left text-slate-400 font-medium">Name</th>
                                                             <th className="px-4 py-2.5 text-left text-slate-400 font-medium">To</th>
+                                                            <th className="px-4 py-2.5 text-left text-slate-400 font-medium">CC</th>
                                                             <th className="px-4 py-2.5 text-left text-slate-400 font-medium">Subject</th>
                                                             <th className="px-4 py-2.5 text-left text-slate-400 font-medium">Send From</th>
                                                             <th className="px-4 py-2.5 text-left text-slate-400 font-medium">Body Preview</th>
@@ -476,21 +496,36 @@
                                                     </thead>
                                                     <tbody>
                                                         {recipients.map((r, i) => {
-                                                            const v = validation?.results?.[r.email];
+                                                            const rowEmails = parseEmailList(r.email);
+                                                            const rowValidations = validation
+                                                                ? rowEmails.map(e => validation.results?.[e]).filter(Boolean)
+                                                                : [];
+                                                            const hasInvalid = rowValidations.some(v => v?.valid === false);
+                                                            const allValid = rowValidations.length > 0 && rowValidations.every(v => v?.valid === true);
+                                                            const hasUnconfirmed = rowValidations.some(v => v?.valid === null);
                                                             return (
-                                                                <tr key={i} className={`border-t border-slate-700/50 hover:bg-slate-800/30 group ${v?.valid === false ? 'bg-red-900/10' : ''}`}>
+                                                                <tr key={i} className={`border-t border-slate-700/50 hover:bg-slate-800/30 group ${hasInvalid ? 'bg-red-900/10' : ''}`}>
                                                                     <td className="px-4 py-2.5 text-slate-500">{i + 1}</td>
                                                                     <td className="px-4 py-2.5 text-white">{r.name}</td>
-                                                                    <td className="px-4 py-2.5 text-blue-400">{r.email}</td>
+                                                                    <td className="px-4 py-2.5 text-blue-400 max-w-[180px]">
+                                                                        {rowEmails.map((e, j) => (
+                                                                            <div key={j} className="truncate">{e}</div>
+                                                                        ))}
+                                                                    </td>
+                                                                    <td className="px-4 py-2.5 text-slate-400 text-xs max-w-[160px]">
+                                                                        {r.cc ? parseEmailList(r.cc).map((e, j) => (
+                                                                            <div key={j} className="truncate">{e}</div>
+                                                                        )) : <span className="text-slate-600">—</span>}
+                                                                    </td>
                                                                     <td className="px-4 py-2.5 text-slate-300">{r.subject}</td>
                                                                     <td className="px-4 py-2.5 text-slate-400 text-xs">{r.sender_email || status?.sender_email || '—'}</td>
                                                                     <td className="px-4 py-2.5 text-slate-400 max-w-xs truncate">{r.body.substring(0, 80)}...</td>
                                                                     {validation && (
                                                                         <td className="px-4 py-2.5">
-                                                                            {!v && <span className="text-slate-500 text-xs">—</span>}
-                                                                            {v?.valid === true && <span className="text-emerald-400 text-xs font-medium">✓ Valid</span>}
-                                                                            {v?.valid === false && <span className="text-red-400 text-xs font-medium" title={v.reason}>✗ Invalid</span>}
-                                                                            {v?.valid === null && <span className="text-amber-400 text-xs font-medium" title={v?.reason}>? Unconfirmed</span>}
+                                                                            {rowValidations.length === 0 && <span className="text-slate-500 text-xs">—</span>}
+                                                                            {rowValidations.length > 0 && allValid && <span className="text-emerald-400 text-xs font-medium">✓ Valid</span>}
+                                                                            {hasInvalid && <span className="text-red-400 text-xs font-medium">✗ Invalid</span>}
+                                                                            {!hasInvalid && hasUnconfirmed && <span className="text-amber-400 text-xs font-medium">? Unconfirmed</span>}
                                                                         </td>
                                                                     )}
                                                                     <td className="px-3 py-2.5">

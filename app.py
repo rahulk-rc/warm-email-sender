@@ -29,6 +29,17 @@ from pathlib import Path
 from flask import Flask, jsonify, request, send_from_directory, redirect, session
 from flask_cors import CORS
 
+def _parse_email_list(raw):
+    """Split a comma/semicolon-separated email string into a cleaned list."""
+    if not raw:
+        return []
+    return [e.strip() for e in raw.replace(';', ',').split(',') if e.strip()]
+
+
+def _normalize_email_list(raw):
+    """Return a normalized comma-separated email string, or empty string."""
+    return ', '.join(_parse_email_list(raw))
+
 from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
@@ -268,16 +279,25 @@ def api_upload():
         errors = []
         for i, row in enumerate(reader, 1):
             name = (row.get(col_map['name']) or '').strip()
-            email = (row.get(col_map['email']) or '').strip()
+            email_raw = (row.get(col_map['email']) or '').strip()
             subject = (row.get(col_map['subject']) or '').strip()
             body = (row.get(col_map['body']) or '').strip()
-            cc = (row.get(col_map.get('cc', ''), '') or '').strip() if col_map.get('cc') else ''
-            bcc = (row.get(col_map.get('bcc', ''), '') or '').strip() if col_map.get('bcc') else ''
+            cc_raw = (row.get(col_map.get('cc', ''), '') or '').strip() if col_map.get('cc') else ''
+            bcc_raw = (row.get(col_map.get('bcc', ''), '') or '').strip() if col_map.get('bcc') else ''
             row_sender = (row.get(col_map.get('sender_email', ''), '') or '').strip() if col_map.get('sender_email') else ''
 
-            if not email or '@' not in email:
-                errors.append(f"Row {i}: invalid or missing email")
+            # Support multiple comma/semicolon-separated To addresses
+            to_emails = _parse_email_list(email_raw)
+            invalid_to = [e for e in to_emails if '@' not in e]
+            if not to_emails or invalid_to:
+                errors.append(f"Row {i}: invalid or missing email(s): {email_raw}")
                 continue
+            email = ', '.join(to_emails)  # normalized
+
+            # Normalize CC and BCC (also supports multiple addresses)
+            cc = _normalize_email_list(cc_raw)
+            bcc = _normalize_email_list(bcc_raw)
+
             if not subject or not body:
                 errors.append(f"Row {i}: missing subject or body")
                 continue
@@ -382,11 +402,20 @@ def _send_one_email(r, svc, actual_sender, log):
         domain = actual_sender.split('@')[1]
 
         msg = MIMEText(r['body'], 'plain')
-        msg['To'] = formataddr((r['name'], r['email']))
+
+        # Support multiple To addresses (comma/semicolon-separated)
+        to_emails = _parse_email_list(r['email'])
+        primary_email = to_emails[0] if to_emails else r['email']
+        if len(to_emails) == 1:
+            msg['To'] = formataddr((r['name'], to_emails[0]))
+        else:
+            to_parts = [formataddr((r['name'], to_emails[0]))] + to_emails[1:]
+            msg['To'] = ', '.join(to_parts)
+
         msg['From'] = actual_sender
         msg['Subject'] = r['subject']
         if r.get('cc'):
-            msg['Cc'] = r['cc']
+            msg['Cc'] = r['cc']   # already normalized comma-separated string
         if r.get('bcc'):
             msg['Bcc'] = r['bcc']
         msg['Message-ID'] = make_msgid(domain=domain)
@@ -397,7 +426,8 @@ def _send_one_email(r, svc, actual_sender, log):
         now = datetime.now()
         entry = {
             "name": r['name'],
-            "email": r['email'],
+            "email": primary_email,   # primary address used for reply tracking
+            "to": r['email'],         # full To list (all addresses)
             "subject": r['subject'],
             "body": r.get('body', ''),
             "cc": r.get('cc', ''),

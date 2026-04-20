@@ -24,6 +24,13 @@ from email.mime.text import MIMEText
 from email.utils import make_msgid, formataddr
 from pathlib import Path
 
+
+def _parse_email_list(raw):
+    """Split a comma/semicolon-separated email string into a cleaned list."""
+    if not raw:
+        return []
+    return [e.strip() for e in raw.replace(';', ',').split(',') if e.strip()]
+
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
@@ -146,19 +153,26 @@ class WarmEmailSender:
 
                 for i, row in enumerate(reader, 1):
                     name = (row.get(col_map['name']) or '').strip()
-                    email = (row.get(col_map['email']) or '').strip()
+                    email_raw = (row.get(col_map['email']) or '').strip()
                     subject = (row.get(col_map['subject']) or '').strip()
                     body = (row.get(col_map['body']) or '').strip()
-                    cc = (row.get(col_map.get('cc', ''), '') or '').strip() if col_map.get('cc') else ''
-                    bcc = (row.get(col_map.get('bcc', ''), '') or '').strip() if col_map.get('bcc') else ''
+                    cc_raw = (row.get(col_map.get('cc', ''), '') or '').strip() if col_map.get('cc') else ''
+                    bcc_raw = (row.get(col_map.get('bcc', ''), '') or '').strip() if col_map.get('bcc') else ''
 
-                    if not email or not subject or not body:
+                    if not email_raw or not subject or not body:
                         print(f"  ⚠️  Row {i}: skipping — missing email, subject, or body")
                         continue
 
-                    if '@' not in email:
-                        print(f"  ⚠️  Row {i}: skipping — invalid email: {email}")
+                    # Support multiple comma/semicolon-separated To addresses
+                    to_emails = _parse_email_list(email_raw)
+                    if not to_emails or any('@' not in e for e in to_emails):
+                        print(f"  ⚠️  Row {i}: skipping — invalid email(s): {email_raw}")
                         continue
+                    email = ', '.join(to_emails)
+
+                    # Normalize CC and BCC
+                    cc = ', '.join(_parse_email_list(cc_raw))
+                    bcc = ', '.join(_parse_email_list(bcc_raw))
 
                     recipients.append({
                         'name': name,
@@ -181,12 +195,22 @@ class WarmEmailSender:
     def _compose_message(self, recipient):
         """Build a plain-text MIME message."""
         msg = MIMEText(recipient['body'], 'plain')
-        msg['To'] = formataddr((recipient['name'], recipient['email']))
+
+        # Support multiple To addresses (comma/semicolon-separated)
+        to_emails = _parse_email_list(recipient['email'])
+        if len(to_emails) == 1:
+            msg['To'] = formataddr((recipient['name'], to_emails[0]))
+        elif len(to_emails) > 1:
+            to_parts = [formataddr((recipient['name'], to_emails[0]))] + to_emails[1:]
+            msg['To'] = ', '.join(to_parts)
+        else:
+            msg['To'] = recipient['email']  # fallback
+
         msg['From'] = self.sender_email
         msg['Subject'] = recipient['subject']
 
         if recipient.get('cc'):
-            msg['Cc'] = recipient['cc']
+            msg['Cc'] = recipient['cc']   # already normalized comma-separated string
         if recipient.get('bcc'):
             msg['Bcc'] = recipient['bcc']
 
