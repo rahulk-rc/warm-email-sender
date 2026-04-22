@@ -1355,6 +1355,93 @@ Be thorough and reference specific emails (by date and subject) as evidence for 
     })
 
 
+# ── Inbox analysis ──────────────────────────────────────────────────────
+
+@app.route('/api/inbox-analysis')
+def api_inbox_analysis():
+    """
+    Count all emails in the inbox for a given account, broken down by
+    internal (rapidclaims.ai / rapidclaimsx.com) vs external sender domain.
+    Uses metadata-only fetches for speed.
+
+    Query params:
+        account  — Gmail address to analyse (default: dushyant@rapidclaims.ai)
+        max_msgs — hard cap on messages to scan (default: 10000)
+    """
+    import re
+    from googleapiclient.errors import HttpError
+
+    account = request.args.get('account', 'dushyant@rapidclaims.ai')
+    max_msgs = int(request.args.get('max_msgs', 10000))
+    INTERNAL = {'rapidclaims.ai', 'rapidclaimsx.com', 'rapiclaims.ai'}
+
+    try:
+        svc = _get_service_for_account(account)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+    def extract_domain(from_header):
+        m = re.search(r'@([\w.\-]+)', from_header or '')
+        return m.group(1).lower() if m else 'unknown'
+
+    # Page through inbox fetching only From metadata
+    domain_counts = {}
+    total_scanned = 0
+    page_token = None
+
+    while total_scanned < max_msgs:
+        batch = min(500, max_msgs - total_scanned)
+        try:
+            result = svc.users().messages().list(
+                userId='me',
+                maxResults=batch,
+                pageToken=page_token,
+            ).execute()
+        except HttpError as e:
+            return jsonify({"error": f"Gmail API error: {e}"}), 500
+
+        msgs = result.get('messages', [])
+        if not msgs:
+            break
+
+        # Fetch From header for each message in this page (100 at a time)
+        for i in range(0, len(msgs), 100):
+            chunk = msgs[i:i+100]
+            for msg in chunk:
+                try:
+                    meta = svc.users().messages().get(
+                        userId='me',
+                        id=msg['id'],
+                        format='metadata',
+                        metadataHeaders=['From'],
+                    ).execute()
+                    headers = meta.get('payload', {}).get('headers', [])
+                    from_val = next((h['value'] for h in headers if h['name'] == 'From'), '')
+                    domain = extract_domain(from_val)
+                    domain_counts[domain] = domain_counts.get(domain, 0) + 1
+                except Exception:
+                    pass
+            total_scanned += len(chunk)
+
+        page_token = result.get('nextPageToken')
+        if not page_token:
+            break
+
+    internal_total = sum(v for k, v in domain_counts.items() if k in INTERNAL)
+    external_total = sum(v for k, v in domain_counts.items() if k not in INTERNAL)
+    external_domains = {k: v for k, v in domain_counts.items() if k not in INTERNAL}
+    top_external = sorted(external_domains.items(), key=lambda x: -x[1])[:50]
+
+    return jsonify({
+        "account": account,
+        "total_scanned": total_scanned,
+        "internal_count": internal_total,
+        "external_count": external_total,
+        "top_external_domains": dict(top_external),
+        "unique_external_domains": len(external_domains),
+    })
+
+
 # ── Migrate legacy data to DATA_DIR ─────────────────────────────────────
 
 def _migrate_legacy_data():
