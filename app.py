@@ -1357,7 +1357,7 @@ Be thorough and reference specific emails (by date and subject) as evidence for 
 
 # ── Inbox analysis ──────────────────────────────────────────────────────
 
-@app.route('/api/inbox-analysis')
+@app.route('/api/inbox-analysis', methods=['GET'])
 def api_inbox_analysis():
     """
     Count all emails in the inbox for a given account, broken down by
